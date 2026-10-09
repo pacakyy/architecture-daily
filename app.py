@@ -1094,18 +1094,30 @@ if selected_view == "NEW":
 
     previous_visit = st.session_state.previous_visit
 
+    
+
     if previous_visit:
 
         previous_visit_dt = datetime.fromisoformat(
             previous_visit
         )
 
+        # Remove timezone info to make datetime comparison consistent
+        if previous_visit_dt.tzinfo is not None:
+            previous_visit_dt = previous_visit_dt.replace(tzinfo=None)
+
         filtered_articles = [
             article
             for article in filtered_articles
             if article["date"] != datetime.min
-            and article["date"] > previous_visit_dt
+            and (
+                article["date"].replace(tzinfo=None)
+                if article["date"].tzinfo is not None
+                else article["date"]
+            ) > previous_visit_dt
         ]
+
+
 
 if selected_view == "SAVED":
 
