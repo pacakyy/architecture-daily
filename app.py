@@ -18,29 +18,30 @@ DATA_FILE = "app_data.json"
 
 def load_app_data():
 
-    if not os.path.exists(DATA_FILE):
+    default_data = {
+        "last_visit": None,
+        "saved": [],
+        "saved_articles": {}
+    }
 
-        return {
-            "last_visit": None,
-            "saved": []
-        }
+    if not os.path.exists(DATA_FILE):
+        return default_data
 
     try:
-
         with open(
             DATA_FILE,
             "r",
             encoding="utf-8"
         ) as file:
+            data = json.load(file)
 
-            return json.load(file)
+        for key, value in default_data.items():
+            data.setdefault(key, value)
 
-    except:
+        return data
 
-        return {
-            "last_visit": None,
-            "saved": []
-        }
+    except (json.JSONDecodeError, OSError):
+        return default_data
 
 
 def save_app_data(data):
@@ -78,6 +79,8 @@ if "app_data" not in st.session_state:
     save_app_data(
         st.session_state.app_data
     )
+    
+st.session_state.app_data.setdefault("saved_articles", {})
 
 # =========================================================
 # USTAWIENIA
@@ -1121,15 +1124,167 @@ if selected_view == "NEW":
 
 if selected_view == "SAVED":
 
-    saved_articles = st.session_state.app_data["saved"]
+    saved_links = st.session_state.app_data["saved"]
 
-    filtered_articles = [
-        article
+    saved_cache = st.session_state.app_data.setdefault(
+    "saved_articles", {}
+    )
+    
+    
+    # Recover saved articles missing from the local cache
+    recovered_any = False
+
+    for link in saved_links:
+
+        if link in saved_cache:
+            continue
+
+        try:
+            response = requests.get(
+                link,
+                headers={
+                    "User-Agent": "Mozilla/5.0"
+                },
+                timeout=15
+            )
+            response.raise_for_status()
+
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
+            )
+
+            def get_meta(*names):
+                for name in names:
+                    tag = soup.find(
+                        "meta",
+                        attrs={"property": name}
+                    ) or soup.find(
+                        "meta",
+                        attrs={"name": name}
+                    )
+
+                    if tag and tag.get("content"):
+                        return unescape(tag["content"]).strip()
+
+                return ""
+
+            title = (
+                get_meta("og:title", "twitter:title")
+                or (soup.title.get_text(strip=True) if soup.title else "")
+            )
+
+            if not title:
+                continue
+
+            domain = requests.utils.urlparse(link).netloc.lower()
+
+            if "archdaily.com" in domain:
+                source = "ArchDaily"
+            elif "divisare.com" in domain:
+                source = "Divisare"
+            elif "designboom.com" in domain:
+                source = "designboom"
+            elif "muratorplus.pl" in domain:
+                source = "Murator"
+            else:
+                source = domain
+
+            date_text = get_meta(
+                "article:published_time",
+                "datePublished",
+                "date"
+            )
+
+            try:
+                article_date = datetime.fromisoformat(
+                    date_text.replace("Z", "+00:00")
+                ) if date_text else datetime.min
+            except ValueError:
+                article_date = datetime.min
+
+            saved_cache[link] = {
+                "link": link,
+                "title": title,
+                "source": source,
+                "date": article_date.isoformat(),
+                "author": get_meta(
+                    "author",
+                    "article:author"
+                ),
+                "image": get_meta(
+                    "og:image",
+                    "twitter:image"
+                ),
+                "summary": get_meta(
+                    "og:description",
+                    "description"
+                )
+            }
+
+            recovered_any = True
+
+        except requests.RequestException as error:
+            st.warning(
+                f"Nie udało się odzyskać artykułu: {link}"
+            )
+
+    if recovered_any:
+        save_app_data(st.session_state.app_data)
+
+
+    current_articles = {
+        article["link"]: article
         for article in filtered_articles
-        if article["link"] in saved_articles
-    ]
+    }
 
-if not articles:
+    filtered_saved_articles = []
+
+    for link in saved_links:
+
+        article = (
+            current_articles.get(link)
+            or saved_cache.get(link)
+        )
+
+        if not article:
+            continue
+
+            # Respect the selected source filter
+        if selected_source != "ALL":
+
+            source_aliases = {
+                "Architektura-Murator": [
+                    "Architektura-Murator",
+                    "Murator"
+                ]
+            }
+
+            allowed_sources = source_aliases.get(
+                selected_source,
+                [selected_source]
+            )
+
+            if article.get("source") not in allowed_sources:
+                continue
+
+        article = article.copy()
+
+        # Convert stored date back to datetime
+        if isinstance(article.get("date"), str):
+            try:
+                article["date"] = datetime.fromisoformat(
+                    article["date"]
+                )
+            except ValueError:
+                article["date"] = datetime.min
+
+        filtered_saved_articles.append(article)
+
+    filtered_articles = filtered_saved_articles
+    
+
+if not filtered_articles:
 
     st.error("Nie znaleziono żadnych artykułów.")
 
@@ -1257,17 +1412,26 @@ else:
                 key=f"save_{index}_{article['link']}"
             ):
 
+                link = article["link"]
+
                 if is_saved:
 
-                    st.session_state.app_data["saved"].remove(
-                        article["link"]
+                    st.session_state.app_data["saved"].remove(link)
+
+                    st.session_state.app_data["saved_articles"].pop(
+                        link, None
                     )
 
                 else:
 
-                    st.session_state.app_data["saved"].append(
-                        article["link"]
-                    )
+                    st.session_state.app_data["saved"].append(link)
+
+                    saved_article = article.copy()
+
+                    if isinstance(saved_article.get("date"), datetime):
+                        saved_article["date"] = saved_article["date"].isoformat()
+
+                    st.session_state.app_data["saved_articles"][link] = saved_article
 
                 save_app_data(
                     st.session_state.app_data
